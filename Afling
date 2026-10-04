@@ -74,7 +74,9 @@ local Cfg = {
 }
 
 local playerTags, originalSizes, originalCollide, originalTransp, hiddenAccs = {},{},{},{},{}
-local minimized=false, selectedTP=nil, stareTarget=nil
+local minimized = false
+local selectedTP = nil
+local stareTarget = nil
 
 local PURPLE       = Color3.fromRGB(140, 60, 220)
 local PURPLE_LIGHT = Color3.fromRGB(180, 100, 255)
