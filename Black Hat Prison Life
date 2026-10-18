@@ -1,0 +1,1102 @@
+--[[
+    🎩🔪Black Hat Prison Life V1🔪🎩
+    Removed: Auto Reload.
+    Triggerbot: automatic smart team check (criminal→cops, cop→criminals+wanted prisoners).
+]]
+
+print("[BHRV] loading...")
+
+local Players      = game:GetService("Players")
+local Teams        = game:GetService("Teams")
+local RunService   = game:GetService("RunService")
+local UIS          = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Lighting     = game:GetService("Lighting")
+local VIM          = game:GetService("VirtualInputManager")
+local RS           = game:GetService("ReplicatedStorage")
+local LP           = Players.LocalPlayer
+
+local G = getgenv and getgenv() or _G
+
+pcall(function()
+    local PS = game:GetService("PhysicsService")
+    PS:RegisterCollisionGroup("BHRV_NoClip")
+    PS:CollisionGroupSetCollidable("BHRV_NoClip", "Default", false)
+    PS:CollisionGroupSetCollidable("BHRV_NoClip", "BHRV_NoClip", false)
+end)
+
+pcall(function() RunService:UnbindFromRenderStep("BHAimbot") end)
+
+local S = {
+    Platform = "PC",
+    Speed = false, SpeedValue = 50,
+    JumpPower = 50,
+    Noclip = false,
+    Aimbot = false, AimbotRange = 500, AimbotWallCheck = true,
+    Triggerbot = false, TriggerWallCheck = true,
+    AntiArrest = false, AntiTase = false,
+    ESP = false, Fullbright = false, FOV = 70,
+    AutoKeycard = false,
+}
+
+local lastSafeHealth = 100
+local lastTPTime = 0
+local recentlyTeleported = 0
+
+local function getChar() return LP.Character end
+local function getHum() local c=getChar(); return c and c:FindFirstChildOfClass("Humanoid") end
+local function getRoot() local c=getChar(); return c and c:FindFirstChild("HumanoidRootPart") end
+local function getCam() return workspace.CurrentCamera end
+local function getBackpack() return LP:FindFirstChildOfClass("Backpack") end
+
+local function getTeamName(p)
+    if p.Team then return p.Team.Name end
+    return "Neutral"
+end
+
+-- ============================================================
+-- SMART TARGET LOGIC (used by aimbot + triggerbot, NOT toggleable)
+-- Criminal → Guards only
+-- Guard → Criminals + wanted Inmates
+-- Inmate → Criminals only
+-- ============================================================
+local function isWanted(p)
+    if not p.Character then return false end
+    local ok, wanted = pcall(function() return p.Character:GetAttribute("Wanted") end)
+    if ok and wanted == true then return true end
+    local ok2, status = pcall(function() return p.Character:GetAttribute("Status") end)
+    if ok2 and (status == "Arrestable" or status == "Trespassing" or status == "Wanted") then
+        return true
+    end
+    local ok3, arrest = pcall(function() return p.Character:GetAttribute("Arrestable") end)
+    if ok3 and arrest == true then return true end
+    return false
+end
+
+local function isTargetEnemy(p)
+    local myTeam = getTeamName(LP)
+    local theirTeam = getTeamName(p)
+    if theirTeam == "Neutral" then return false end
+    if myTeam == "Criminals" then
+        return theirTeam == "Guards"
+    end
+    if myTeam == "Guards" then
+        if theirTeam == "Criminals" then return true end
+        if theirTeam == "Inmates" and isWanted(p) then return true end
+        return false
+    end
+    if myTeam == "Inmates" then
+        return theirTeam == "Criminals"
+    end
+    return false
+end
+
+local function getPlayers()
+    local t = {}
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LP and p.Character then
+            local hrp = p.Character:FindFirstChild("HumanoidRootPart")
+            local h = p.Character:FindFirstChildOfClass("Humanoid")
+            if hrp and h and h.Health > 0 then table.insert(t, p) end
+        end
+    end
+    return t
+end
+
+local TOOLS = {
+    {label="AK47",      keys={"ak47","ak-47"}},
+    {label="Remington", keys={"remington","shotgun","870"}},
+    {label="MP5",       keys={"mp5"}},
+    {label="Hammer",    keys={"hammer"}},
+    {label="Keycard",   keys={"keycard"}},
+}
+
+local function matchesKeys(name, keys)
+    local n = name:lower()
+    for _, k in ipairs(keys) do
+        if n:find(k, 1, true) then return true end
+    end
+    return false
+end
+
+local function isHeld(tool)
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Character and tool:IsDescendantOf(p.Character) then return true end
+    end
+    for _, p in ipairs(Players:GetPlayers()) do
+        local bp = p:FindFirstChildOfClass("Backpack")
+        if bp and tool:IsDescendantOf(bp) then return true end
+    end
+    return false
+end
+
+local function findSpawnedTool(keys)
+    for _, v in ipairs(workspace:GetDescendants()) do
+        if v:IsA("Tool") and matchesKeys(v.Name, keys) and not isHeld(v) then return v end
+    end
+    return nil
+end
+
+local function findHeldTool(keys)
+    local bp = getBackpack()
+    if bp then
+        for _, t in ipairs(bp:GetChildren()) do
+            if t:IsA("Tool") and matchesKeys(t.Name, keys) then return t end
+        end
+    end
+    local c = getChar()
+    if c then
+        for _, t in ipairs(c:GetChildren()) do
+            if t:IsA("Tool") and matchesKeys(t.Name, keys) then return t end
+        end
+    end
+    return nil
+end
+
+local function isVisible(targetPart)
+    local cam = getCam()
+    if not cam then return true end
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    local c = getChar()
+    if c then params.FilterDescendantsInstances = {c} end
+    local dir = (targetPart.Position - cam.CFrame.Position)
+    local result = workspace:Raycast(cam.CFrame.Position, dir, params)
+    if not result then return true end
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p.Character and result.Instance:IsDescendantOf(p.Character) then
+            return true
+        end
+    end
+    return false
+end
+
+-- SAFE TP
+local function safeTP(targetPos, statusCb, skipClamp)
+    local root = getRoot(); if not root then return false end
+    local h = getHum(); if h then lastSafeHealth = h.Health end
+
+    local now = tick()
+    if now - lastTPTime < 0.15 then task.wait(0.15 - (now - lastTPTime)) end
+    lastTPTime = tick()
+    recentlyTeleported = tick()
+
+    local finalY = targetPos.Y
+    if not skipClamp then
+        local params = RaycastParams.new()
+        local c = getChar()
+        if c then params.FilterDescendantsInstances = {c} end
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        local hit = workspace:Raycast(targetPos + Vector3.new(0, 8, 0), Vector3.new(0, -200, 0), params)
+        if hit and hit.Position and hit.Position.Y < targetPos.Y - 1 then
+            finalY = hit.Position.Y + 4
+        end
+    end
+
+    local final = Vector3.new(targetPos.X, finalY, targetPos.Z)
+    local delta = final - root.Position
+    local dist = delta.Magnitude
+
+    if dist > 250 then
+        if statusCb then statusCb("walking " .. math.floor(dist)) end
+        local steps = math.ceil(dist / 200)
+        for _ = 1, steps do
+            local remaining = (final - root.Position).Magnitude
+            local stepDist = math.min(200, remaining)
+            local stepPos = root.Position + (final - root.Position).Unit * stepDist
+            root.CFrame = CFrame.new(Vector3.new(stepPos.X, finalY, stepPos.Z))
+            root.Velocity = Vector3.zero
+            task.wait(0.15)
+            if h then
+                if h.Health < lastSafeHealth - 3 and h.Health > 0 then
+                    pcall(function() h.Health = lastSafeHealth end)
+                end
+                lastSafeHealth = h.Health
+            end
+        end
+    else
+        root.CFrame = CFrame.new(final)
+    end
+    root.Velocity = Vector3.zero
+    pcall(function() root.AssemblyLinearVelocity = Vector3.zero end)
+
+    task.wait(0.1)
+    if h then
+        if h.Health < lastSafeHealth - 3 and h.Health > 0 then
+            pcall(function() h.Health = lastSafeHealth end)
+        end
+    end
+    recentlyTeleported = tick()
+    return true
+end
+
+-- GRAB
+local function grabTool(keys, statusCb)
+    local root = getRoot()
+    local hum = getHum()
+    if not root or not hum then return false end
+    local original = root.CFrame
+
+    local tool = findSpawnedTool(keys)
+    local targetPart, targetName
+    if tool then
+        targetPart = tool:FindFirstChild("Handle") or tool:FindFirstChildWhichIsA("BasePart")
+        targetName = tool.Name
+    end
+    if not targetPart then
+        for _, v in ipairs(workspace:GetDescendants()) do
+            if v:IsA("BasePart") and not v:IsA("Tool") and matchesKeys(v.Name, keys) then
+                local skip = false
+                for _, p in ipairs(Players:GetPlayers()) do
+                    if p.Character and v:IsDescendantOf(p.Character) then skip = true; break end
+                end
+                if not skip then targetPart = v; targetName = v.Name; break end
+            end
+        end
+    end
+    if not targetPart then
+        if statusCb then statusCb("not found") end
+        return false
+    end
+
+    safeTP(targetPart.Position + Vector3.new(0, 3, 2), statusCb, true)
+    task.wait(0.1)
+    if statusCb then statusCb("walking into " .. targetName) end
+
+    local grabbed = false
+    for _ = 1, 4 do
+        pcall(function() hum:MoveTo(targetPart.Position) end)
+        for _ = 1, 8 do
+            task.wait(0.08)
+            if findHeldTool(keys) then grabbed = true; break end
+            local dist = (root.Position - targetPart.Position).Magnitude
+            if dist < 4 then
+                pcall(function()
+                    root.CFrame = CFrame.new(targetPart.Position + Vector3.new(0, 1, 0))
+                end)
+                task.wait(0.06)
+                if findHeldTool(keys) then grabbed = true; break end
+            end
+        end
+        if grabbed then break end
+    end
+
+    root.CFrame = original
+    root.Velocity = Vector3.zero
+    task.wait(0.25)
+
+    if grabbed then
+        local finalTool = findHeldTool(keys)
+        local h2 = getHum()
+        local c2 = getChar()
+        if finalTool and h2 and c2 then
+            if finalTool.Parent ~= c2 then
+                pcall(function() h2:EquipTool(finalTool) end)
+                task.wait(0.15)
+                if finalTool.Parent ~= c2 then
+                    pcall(function() finalTool.Parent = c2 end)
+                end
+            end
+        end
+        if statusCb then statusCb("grabbed & equipped") end
+        return true
+    end
+    if statusCb then statusCb("failed") end
+    return false
+end
+
+-- LOCATIONS
+local LOCATIONS = {
+    {label="Yard",          keys={"yard"}},
+    {label="Cafeteria",     keys={"cafeteria","cafe"}},
+    {label="Cell Block",    keys={"cellblock","cell"}},
+    {label="Entrance",      keys={"entrance","frontdoor","frontgate","maingate","gate"}},
+    {label="Tower",         keys={"tower","guardtower"}},
+    {label="Spawn",         keys={"spawn"}},
+    {label="Criminal Base", keys={"criminalbase","crimbase","criminal"}},
+    {label="Police Base",   keys={"policebase","polbase","police"}},
+    {label="Sewers",        keys={"sewer"}},
+    {label="Bank",          keys={"bank","vault"}},
+}
+
+local function findLocation(keys)
+    for _, v in ipairs(workspace:GetDescendants()) do
+        if v:IsA("BasePart") and not v:IsA("Tool") then
+            local n = v.Name:lower()
+            for _, k in ipairs(keys) do
+                if n == k then return v.Position, v.Name end
+            end
+        end
+    end
+    for _, v in ipairs(workspace:GetDescendants()) do
+        if v:IsA("BasePart") and not v:IsA("Tool") then
+            local n = v.Name:lower()
+            for _, k in ipairs(keys) do
+                if n:find(k, 1, true) then return v.Position, v.Name end
+            end
+        end
+    end
+    for _, v in ipairs(workspace:GetDescendants()) do
+        if v:IsA("Model") then
+            local n = v.Name:lower()
+            for _, k in ipairs(keys) do
+                if n:find(k, 1, true) then
+                    if v.PrimaryPart then return v.PrimaryPart.Position, v.Name end
+                    local ok, cf = pcall(function() return v:GetPivot() end)
+                    if ok and cf then return cf.Position, v.Name end
+                end
+            end
+        end
+    end
+    return nil, nil
+end
+
+-- SELECTOR
+local playerGui = LP:WaitForChild("PlayerGui", 10)
+
+for _, n in ipairs({"BlackHatPL", "BlackHatPLSelector"}) do
+    local old = playerGui:FindFirstChild(n)
+    if old then old:Destroy() end
+end
+
+local selector = Instance.new("ScreenGui")
+selector.Name = "BlackHatPLSelector"
+selector.ResetOnSpawn = false
+selector.IgnoreGuiInset = true
+selector.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+selector.DisplayOrder = 1000
+selector.Parent = playerGui
+
+local selFrame = Instance.new("Frame")
+selFrame.Size = UDim2.fromOffset(320, 220)
+selFrame.Position = UDim2.new(0.5, -160, 0.5, -110)
+selFrame.BackgroundColor3 = Color3.fromRGB(15, 5, 25)
+selFrame.BorderSizePixel = 0
+selFrame.Active = true
+selFrame.Parent = selector
+Instance.new("UICorner", selFrame).CornerRadius = UDim.new(0, 10)
+
+local selTitle = Instance.new("TextLabel")
+selTitle.Size = UDim2.new(1, 0, 0, 40)
+selTitle.Position = UDim2.fromOffset(0, 12)
+selTitle.BackgroundTransparency = 1
+selTitle.Text = "🎩 Select Platform 🔪"
+selTitle.TextColor3 = Color3.fromRGB(220, 160, 255)
+selTitle.Font = Enum.Font.GothamBold
+selTitle.TextSize = 17
+selTitle.Parent = selFrame
+
+local selStatus = Instance.new("TextLabel")
+selStatus.Size = UDim2.new(1, -20, 0, 50)
+selStatus.Position = UDim2.fromOffset(10, 155)
+selStatus.BackgroundTransparency = 1
+selStatus.Text = ""
+selStatus.TextColor3 = Color3.fromRGB(255, 150, 150)
+selStatus.Font = Enum.Font.Code
+selStatus.TextSize = 9
+selStatus.TextWrapped = true
+selStatus.TextXAlignment = Enum.TextXAlignment.Left
+selStatus.TextYAlignment = Enum.TextYAlignment.Top
+selStatus.Parent = selFrame
+
+local function makeSelBtn(text, x, cb)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.fromOffset(130, 60)
+    b.Position = UDim2.fromOffset(x, 80)
+    b.BackgroundColor3 = Color3.fromRGB(70, 20, 110)
+    b.Text = text
+    b.TextColor3 = Color3.fromRGB(230, 200, 255)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 16
+    b.BorderSizePixel = 0
+    b.Active = true
+    b.Parent = selFrame
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
+    local fired = false
+    local function fire()
+        if fired then return end
+        fired = true
+        b.Text = "loading..."
+        b.BackgroundColor3 = Color3.fromRGB(120, 40, 180)
+        task.spawn(function()
+            local ok, err = xpcall(cb, debug.traceback)
+            if not ok then
+                fired = false
+                b.Text = text
+                b.BackgroundColor3 = Color3.fromRGB(70, 20, 110)
+                selStatus.Text = "ERROR:\n" .. tostring(err):sub(1, 400)
+                warn("[BHRV]", err)
+            end
+        end)
+    end
+    b.MouseButton1Click:Connect(fire)
+    return b
+end
+
+makeSelBtn("📱 Mobile", 15, function()
+    G.__BH_Platform = "Mobile"
+    G.__BH_BuildMain()
+    selector:Destroy()
+end)
+
+makeSelBtn("💻 PC", 175, function()
+    G.__BH_Platform = "PC"
+    G.__BH_BuildMain()
+    selector:Destroy()
+end)
+
+-- MAIN GUI
+G.__BH_BuildMain = function()
+    local Platform = G.__BH_Platform or "PC"
+    print("[BHRV] build start:", Platform)
+
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "BlackHatPL"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    gui.Parent = playerGui
+
+    local main = Instance.new("Frame")
+    main.Size = UDim2.fromOffset(400, 320)
+    main.Position = UDim2.new(0.5, -200, 0.5, -160)
+    main.BackgroundColor3 = Color3.fromRGB(15, 5, 25)
+    main.BorderSizePixel = 0
+    main.Active = true
+    main.Parent = gui
+    Instance.new("UICorner", main).CornerRadius = UDim.new(0, 10)
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(140, 40, 210); stroke.Thickness = 2; stroke.Parent = main
+
+    local title = Instance.new("Frame")
+    title.Size = UDim2.new(1, 0, 0, 32)
+    title.BackgroundColor3 = Color3.fromRGB(35, 5, 55)
+    title.BorderSizePixel = 0; title.Parent = main
+    Instance.new("UICorner", title).CornerRadius = UDim.new(0, 10)
+
+    local titleTxt = Instance.new("TextLabel")
+    titleTxt.Size = UDim2.new(1, -90, 1, 0); titleTxt.Position = UDim2.new(0, 12, 0, 0)
+    titleTxt.BackgroundTransparency = 1
+    titleTxt.Text = "🎩🔪Black Hat Prison Life V1🔪🎩"
+    titleTxt.TextColor3 = Color3.fromRGB(210, 130, 255)
+    titleTxt.Font = Enum.Font.GothamBold; titleTxt.TextSize = 12
+    titleTxt.TextXAlignment = Enum.TextXAlignment.Left; titleTxt.Parent = title
+
+    local minBtn = Instance.new("TextButton")
+    minBtn.Size = UDim2.fromOffset(26, 26); minBtn.Position = UDim2.new(1, -60, 0, 3)
+    minBtn.BackgroundColor3 = Color3.fromRGB(50, 10, 70)
+    minBtn.Text = "—"; minBtn.TextColor3 = Color3.fromRGB(220, 180, 255)
+    minBtn.Font = Enum.Font.GothamBold; minBtn.TextSize = 15; minBtn.BorderSizePixel = 0
+    minBtn.ZIndex = 100; minBtn.Parent = main
+    Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 6)
+
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size = UDim2.fromOffset(26, 26); closeBtn.Position = UDim2.new(1, -30, 0, 3)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(70, 5, 30)
+    closeBtn.Text = "✕"; closeBtn.TextColor3 = Color3.fromRGB(255, 180, 200)
+    closeBtn.Font = Enum.Font.GothamBold; closeBtn.TextSize = 12; closeBtn.BorderSizePixel = 0
+    closeBtn.ZIndex = 100; closeBtn.Parent = main
+    Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 6)
+    closeBtn.MouseButton1Click:Connect(function() gui.Enabled = false end)
+
+    local minimized, minimizing = false, false
+    local expandedSize = UDim2.fromOffset(400, 320)
+    local function collectContent()
+        local list = {}
+        for _, v in ipairs(main:GetChildren()) do
+            if v ~= title and v ~= minBtn and v ~= closeBtn and v:IsA("GuiObject") then
+                table.insert(list, v)
+            end
+        end
+        return list
+    end
+    minBtn.MouseButton1Click:Connect(function()
+        if minimizing then return end
+        minimizing = true
+        local contents = collectContent()
+        if not minimized then
+            expandedSize = main.Size
+            for _, v in ipairs(contents) do v.Visible = false end
+            local t = TweenService:Create(main, TweenInfo.new(0.15), {
+                Size = UDim2.fromOffset(expandedSize.X.Offset, 32)
+            })
+            t:Play()
+            t.Completed:Connect(function()
+                minimized = true; minBtn.Text = "+"; minimizing = false
+            end)
+        else
+            local t = TweenService:Create(main, TweenInfo.new(0.15), {Size = expandedSize})
+            t:Play()
+            t.Completed:Connect(function()
+                for _, v in ipairs(contents) do v.Visible = true end
+                minimized = false; minBtn.Text = "—"; minimizing = false
+            end)
+        end
+    end)
+
+    local dgn, dgi, dgs, dsp
+    title.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            dgn = true; dgs = i.Position; dsp = main.Position
+            i.Changed:Connect(function()
+                if i.UserInputState == Enum.UserInputState.End then dgn = false end
+            end)
+        end
+    end)
+    title.InputChanged:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then
+            dgi = i
+        end
+    end)
+    UIS.InputChanged:Connect(function(i)
+        if i == dgi and dgn then
+            local d = i.Position - dgs
+            main.Position = UDim2.new(dsp.X.Scale, dsp.X.Offset + d.X, dsp.Y.Scale, dsp.Y.Offset + d.Y)
+        end
+    end)
+
+    local tabsCol = Instance.new("Frame")
+    tabsCol.Size = UDim2.new(0, 110, 1, -44); tabsCol.Position = UDim2.new(0, 6, 0, 40)
+    tabsCol.BackgroundColor3 = Color3.fromRGB(18, 6, 30); tabsCol.BorderSizePixel = 0
+    tabsCol.Parent = main
+    Instance.new("UICorner", tabsCol).CornerRadius = UDim.new(0, 8)
+    local tl = Instance.new("UIListLayout")
+    tl.Padding = UDim.new(0, 4); tl.SortOrder = Enum.SortOrder.LayoutOrder; tl.Parent = tabsCol
+    local tp = Instance.new("UIPadding")
+    tp.PaddingTop = UDim.new(0, 6); tp.PaddingLeft = UDim.new(0, 6); tp.PaddingRight = UDim.new(0, 6)
+    tp.Parent = tabsCol
+
+    local content = Instance.new("Frame")
+    content.Size = UDim2.new(1, -124, 1, -46); content.Position = UDim2.new(0, 120, 0, 40)
+    content.BackgroundColor3 = Color3.fromRGB(20, 8, 32); content.BorderSizePixel = 0
+    content.Parent = main
+    Instance.new("UICorner", content).CornerRadius = UDim.new(0, 8)
+
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Size = UDim2.new(1, 0, 1, 0)
+    scroll.BackgroundTransparency = 1
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 8
+    scroll.ScrollBarImageColor3 = Color3.fromRGB(170, 60, 240)
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    scroll.Parent = content
+    local cl = Instance.new("UIListLayout")
+    cl.Padding = UDim.new(0, 6); cl.SortOrder = Enum.SortOrder.LayoutOrder; cl.Parent = scroll
+    local cp = Instance.new("UIPadding")
+    cp.PaddingTop = UDim.new(0, 8); cp.PaddingLeft = UDim.new(0, 8)
+    cp.PaddingRight = UDim.new(0, 8); cp.PaddingBottom = UDim.new(0, 8); cp.Parent = scroll
+
+    local pages, tabBtns = {}, {}
+    local function selectTab(name)
+        for k, p in pairs(pages) do p.Visible = (k == name) end
+        for k, b in pairs(tabBtns) do
+            b.BackgroundColor3 = (k == name) and Color3.fromRGB(95, 25, 145) or Color3.fromRGB(35, 12, 55)
+            b.TextColor3 = (k == name) and Color3.fromRGB(240, 190, 255) or Color3.fromRGB(180, 160, 200)
+        end
+    end
+    local function makeTab(name)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1, 0, 0, 30)
+        b.BackgroundColor3 = Color3.fromRGB(35, 12, 55)
+        b.Text = name; b.TextColor3 = Color3.fromRGB(180, 160, 200)
+        b.Font = Enum.Font.GothamBold; b.TextSize = 12; b.BorderSizePixel = 0
+        b.Parent = tabsCol
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+        local p = Instance.new("Frame")
+        p.Name = name; p.BackgroundTransparency = 1
+        p.Size = UDim2.new(1, 0, 0, 0); p.AutomaticSize = Enum.AutomaticSize.Y
+        p.Visible = false; p.Parent = scroll
+        local l = Instance.new("UIListLayout")
+        l.Padding = UDim.new(0, 6); l.SortOrder = Enum.SortOrder.LayoutOrder; l.Parent = p
+        tabBtns[name] = b; pages[name] = p
+        b.MouseButton1Click:Connect(function() selectTab(name) end)
+        return p
+    end
+
+    local function makeHeader(parent, text)
+        local h = Instance.new("TextLabel")
+        h.Size = UDim2.new(1, 0, 0, 20)
+        h.BackgroundTransparency = 1
+        h.Text = "▸ " .. text
+        h.TextColor3 = Color3.fromRGB(170, 100, 230)
+        h.Font = Enum.Font.GothamBold; h.TextSize = 11
+        h.TextXAlignment = Enum.TextXAlignment.Left; h.Parent = parent
+    end
+
+    local function makeToggle(parent, label, key, cb)
+        local row = Instance.new("Frame")
+        row.Size = UDim2.new(1, 0, 0, 30)
+        row.BackgroundColor3 = Color3.fromRGB(32, 14, 48); row.BorderSizePixel = 0
+        row.Parent = parent
+        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
+        local t = Instance.new("TextLabel")
+        t.Size = UDim2.new(1, -60, 1, 0); t.Position = UDim2.new(0, 10, 0, 0)
+        t.BackgroundTransparency = 1; t.Text = label
+        t.TextColor3 = Color3.fromRGB(225, 215, 245)
+        t.Font = Enum.Font.Gotham; t.TextSize = 12
+        t.TextXAlignment = Enum.TextXAlignment.Left; t.Parent = row
+        local box = Instance.new("TextButton")
+        box.Size = UDim2.fromOffset(38, 20); box.Position = UDim2.new(1, -46, 0, 5)
+        box.BackgroundColor3 = Color3.fromRGB(60, 30, 90)
+        box.Text = ""; box.BorderSizePixel = 0; box.Parent = row
+        Instance.new("UICorner", box).CornerRadius = UDim.new(1, 0)
+        local knob = Instance.new("Frame")
+        knob.Size = UDim2.fromOffset(16, 16); knob.Position = UDim2.new(0, 2, 0, 2)
+        knob.BackgroundColor3 = Color3.fromRGB(200, 200, 220); knob.BorderSizePixel = 0
+        knob.Parent = box
+        Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
+        local on = S[key] and true or false
+        local function refresh()
+            TweenService:Create(knob, TweenInfo.new(0.15), {
+                Position = on and UDim2.new(1, -18, 0, 2) or UDim2.new(0, 2, 0, 2)
+            }):Play()
+            box.BackgroundColor3 = on and Color3.fromRGB(140, 40, 210) or Color3.fromRGB(60, 30, 90)
+        end
+        refresh()
+        box.MouseButton1Click:Connect(function()
+            on = not on; S[key] = on; refresh()
+            if cb then pcall(cb, on) end
+        end)
+    end
+
+    local function makeSlider(parent, label, min, max, key, cb)
+        local row = Instance.new("Frame")
+        row.Size = UDim2.new(1, 0, 0, 44)
+        row.BackgroundColor3 = Color3.fromRGB(32, 14, 48); row.BorderSizePixel = 0
+        row.Parent = parent
+        Instance.new("UICorner", row).CornerRadius = UDim.new(0, 6)
+        local t = Instance.new("TextLabel")
+        t.Size = UDim2.new(1, 0, 0, 18); t.Position = UDim2.new(0, 10, 0, 4)
+        t.BackgroundTransparency = 1
+        t.Text = label .. ": " .. tostring(math.floor(S[key]))
+        t.TextColor3 = Color3.fromRGB(225, 215, 245)
+        t.Font = Enum.Font.Gotham; t.TextSize = 11
+        t.TextXAlignment = Enum.TextXAlignment.Left; t.Parent = row
+        local bar = Instance.new("Frame")
+        bar.Size = UDim2.new(1, -20, 0, 12); bar.Position = UDim2.new(0, 10, 0, 26)
+        bar.BackgroundColor3 = Color3.fromRGB(60, 30, 90); bar.BorderSizePixel = 0
+        bar.Parent = row
+        Instance.new("UICorner", bar).CornerRadius = UDim.new(1, 0)
+        local fill = Instance.new("Frame")
+        fill.Size = UDim2.new((S[key] - min) / (max - min), 0, 1, 0)
+        fill.BackgroundColor3 = Color3.fromRGB(170, 60, 240); fill.BorderSizePixel = 0
+        fill.Parent = bar
+        Instance.new("UICorner", fill).CornerRadius = UDim.new(1, 0)
+        local drag = false
+        local function setFromX(x)
+            local rel = math.clamp((x - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
+            local v = min + (max - min) * rel
+            S[key] = v
+            fill.Size = UDim2.new(rel, 0, 1, 0)
+            t.Text = label .. ": " .. math.floor(v)
+            if cb then pcall(cb, v) end
+        end
+        bar.InputBegan:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+                drag = true; setFromX(i.Position.X)
+            end
+        end)
+        UIS.InputChanged:Connect(function(i)
+            if drag and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
+                setFromX(i.Position.X)
+            end
+        end)
+        UIS.InputEnded:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+                drag = false
+            end
+        end)
+    end
+
+    local function makeButton(parent, label, cb)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.new(1, 0, 0, 30)
+        b.BackgroundColor3 = Color3.fromRGB(70, 20, 110)
+        b.Text = label; b.TextColor3 = Color3.fromRGB(230, 200, 255)
+        b.Font = Enum.Font.GothamBold; b.TextSize = 12; b.BorderSizePixel = 0
+        b.Parent = parent
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+        b.MouseButton1Click:Connect(function() pcall(cb) end)
+    end
+
+    local toolsStatus
+    local combat   = makeTab("⚔ Combat")
+    local toolsTab = makeTab("🔧 Tools")
+    local move     = makeTab("🏃 Move")
+    local tp       = makeTab("✦ Teleport")
+    local vis      = makeTab("👁 Visuals")
+
+    -- COMBAT
+    makeHeader(combat, "Aimbot")
+    makeToggle(combat, "Aimbot (auto team+wall check)", "Aimbot")
+    makeSlider(combat, "Aimbot Range", 50, 1000, "AimbotRange")
+    makeToggle(combat, "Aimbot Wall Check", "AimbotWallCheck")
+    makeHeader(combat, "Triggerbot (auto team check)")
+    makeToggle(combat, "Triggerbot", "Triggerbot")
+    makeToggle(combat, "Trigger Wall Check", "TriggerWallCheck")
+    makeButton(combat, "🔍 Who Can I Shoot?", function()
+        local myTeam = getTeamName(LP)
+        local lines = {"My team: " .. myTeam}
+        if myTeam == "Criminals" then
+            table.insert(lines, "Can target: Guards")
+        elseif myTeam == "Guards" then
+            table.insert(lines, "Can target: Criminals + Wanted Inmates")
+        elseif myTeam == "Inmates" then
+            table.insert(lines, "Can target: Criminals")
+        else
+            table.insert(lines, "No team — cannot target anyone")
+        end
+        local count = 0
+        for _, p in ipairs(getPlayers()) do
+            if isTargetEnemy(p) then count = count + 1 end
+        end
+        table.insert(lines, "Valid targets visible: " .. count)
+        if toolsStatus then toolsStatus.Text = table.concat(lines, "\n") end
+    end)
+
+    -- TOOLS
+    makeHeader(toolsTab, "Click to grab")
+    for _, toolDef in ipairs(TOOLS) do
+        local td = toolDef
+        makeButton(toolsTab, "🔥 Grab " .. td.label, function()
+            if toolsStatus then toolsStatus.Text = "Grabbing " .. td.label .. "..." end
+            grabTool(td.keys, function(s)
+                if toolsStatus then toolsStatus.Text = td.label .. ": " .. s end
+            end)
+        end)
+    end
+    makeHeader(toolsTab, "Auto")
+    makeToggle(toolsTab, "Auto Keycard on Drop", "AutoKeycard")
+    makeHeader(toolsTab, "Status")
+    toolsStatus = Instance.new("TextLabel")
+    toolsStatus.Size = UDim2.new(1, 0, 0, 80)
+    toolsStatus.BackgroundColor3 = Color3.fromRGB(25, 10, 40)
+    toolsStatus.Text = "idle"
+    toolsStatus.TextColor3 = Color3.fromRGB(200, 170, 240)
+    toolsStatus.Font = Enum.Font.Code; toolsStatus.TextSize = 10
+    toolsStatus.TextWrapped = true
+    toolsStatus.TextYAlignment = Enum.TextYAlignment.Top
+    toolsStatus.BorderSizePixel = 0
+    toolsStatus.Parent = toolsTab
+    Instance.new("UICorner", toolsStatus).CornerRadius = UDim.new(0, 6)
+
+    -- MOVE
+    makeHeader(move, "Speed")
+    makeToggle(move, "Speed Hack", "Speed")
+    makeSlider(move, "Speed Value", 16, 200, "SpeedValue")
+    makeHeader(move, "Physics")
+    makeToggle(move, "Noclip", "Noclip")
+    makeSlider(move, "Jump Power", 50, 300, "JumpPower")
+    makeHeader(move, "Defense")
+    makeToggle(move, "Anti Arrest", "AntiArrest")
+    makeToggle(move, "Anti Tase", "AntiTase")
+
+    -- TELEPORT
+    makeHeader(tp, "Players")
+    makeButton(tp, "👤 TP to Nearest Target", function()
+        local root = getRoot(); if not root then return end
+        local nearest, nd = nil, math.huge
+        for _, p in ipairs(getPlayers()) do
+            if isTargetEnemy(p) then
+                local hrp = p.Character:FindFirstChild("HumanoidRootPart")
+                if hrp then
+                    local d = (hrp.Position - root.Position).Magnitude
+                    if d < nd then nearest, nd = p, d end
+                end
+            end
+        end
+        if nearest then
+            local hrp = nearest.Character:FindFirstChild("HumanoidRootPart")
+            if hrp then safeTP(hrp.Position + Vector3.new(0, 3, 0)) end
+        end
+    end)
+    makeHeader(tp, "Locations")
+    for _, loc in ipairs(LOCATIONS) do
+        local lc = loc
+        makeButton(tp, "📍 " .. lc.label, function()
+            local pos, foundName = findLocation(lc.keys)
+            if pos then
+                safeTP(pos + Vector3.new(0, 4, 0))
+                if toolsStatus then toolsStatus.Text = "TP " .. lc.label .. " → " .. foundName end
+            else
+                if toolsStatus then toolsStatus.Text = "NOT FOUND: " .. lc.label end
+            end
+        end)
+    end
+
+    -- VISUALS
+    makeHeader(vis, "Render")
+    makeToggle(vis, "Player ESP (team colored)", "ESP")
+    makeToggle(vis, "Fullbright", "Fullbright")
+    makeSlider(vis, "FOV", 40, 120, "FOV", function(v)
+        local cam = getCam(); if cam then cam.FieldOfView = v end
+    end)
+
+    selectTab("⚔ Combat")
+
+    UIS.InputBegan:Connect(function(i, gpe)
+        if gpe then return end
+        if i.KeyCode == Enum.KeyCode.RightShift then gui.Enabled = not gui.Enabled end
+    end)
+
+    -- AIMBOT
+    pcall(function() RunService:UnbindFromRenderStep("BHAimbot") end)
+    RunService:BindToRenderStep("BHAimbot", Enum.RenderPriority.Camera.Value + 1, function()
+        if not S.Aimbot then return end
+        local cam = getCam(); if not cam then return end
+        local nearest, nd = nil, math.huge
+        local cp = cam.CFrame.Position
+        for _, p in ipairs(getPlayers()) do
+            if isTargetEnemy(p) then
+                local head = p.Character:FindFirstChild("Head")
+                if head then
+                    local d = (head.Position - cp).Magnitude
+                    if d < nd and d <= S.AimbotRange then
+                        if not S.AimbotWallCheck or isVisible(head) then
+                            nearest, nd = p, d
+                        end
+                    end
+                end
+            end
+        end
+        if nearest then
+            local head = nearest.Character:FindFirstChild("Head")
+            if head then cam.CFrame = CFrame.lookAt(cp, head.Position) end
+        end
+    end)
+
+    -- ESP
+    local espData = {}
+    local function teamColor(p)
+        local team = getTeamName(p)
+        if team == "Guards" then return Color3.fromRGB(50, 120, 255) end
+        if team == "Criminals" then return Color3.fromRGB(255, 50, 50) end
+        if team == "Inmates" then return Color3.fromRGB(255, 150, 50) end
+        return Color3.fromRGB(170, 0, 255)
+    end
+    local function makeESPFor(p)
+        if espData[p] then return espData[p] end
+        local ch = p.Character; if not ch then return nil end
+        local col = teamColor(p)
+        local hl = Instance.new("Highlight")
+        hl.FillTransparency = 0.5; hl.OutlineTransparency = 0
+        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        hl.FillColor = col; hl.OutlineColor = col
+        hl.Adornee = ch; hl.Parent = gui
+        local head = ch:FindFirstChild("Head")
+        if not head then hl:Destroy(); return nil end
+        local bg = Instance.new("BillboardGui")
+        bg.Size = UDim2.fromOffset(200, 34)
+        bg.StudsOffset = Vector3.new(0, 3, 0)
+        bg.AlwaysOnTop = true; bg.Adornee = head; bg.Parent = gui
+        local nameLbl = Instance.new("TextLabel")
+        nameLbl.Size = UDim2.new(1, 0, 0, 18)
+        nameLbl.BackgroundTransparency = 1
+        nameLbl.Text = p.Name
+        nameLbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+        nameLbl.Font = Enum.Font.GothamBold; nameLbl.TextSize = 13
+        nameLbl.TextStrokeTransparency = 0; nameLbl.Parent = bg
+        local teamLbl = Instance.new("TextLabel")
+        teamLbl.Size = UDim2.new(1, 0, 0, 16)
+        teamLbl.Position = UDim2.fromOffset(0, 18)
+        teamLbl.BackgroundTransparency = 1
+        teamLbl.Text = "[" .. getTeamName(p) .. "]"
+        teamLbl.TextColor3 = col
+        teamLbl.Font = Enum.Font.GothamBold; teamLbl.TextSize = 11
+        teamLbl.TextStrokeTransparency = 0; teamLbl.Parent = bg
+        espData[p] = {hl = hl, bg = bg, teamLbl = teamLbl}
+        return espData[p]
+    end
+    Players.PlayerRemoving:Connect(function(p)
+        local d = espData[p]
+        if d then
+            pcall(function() d.hl:Destroy() end)
+            pcall(function() d.bg:Destroy() end)
+            espData[p] = nil
+        end
+    end)
+
+    -- MAIN LOOP
+    local prev = { Speed = false, JumpPower = 50, Noclip = false }
+    RunService.Heartbeat:Connect(function()
+        pcall(function()
+            local h, r = getHum(), getRoot()
+            if h and r then
+                if S.Speed then
+                    if h.WalkSpeed ~= S.SpeedValue then h.WalkSpeed = S.SpeedValue end
+                elseif prev.Speed then
+                    h.WalkSpeed = 16
+                end
+                prev.Speed = S.Speed
+
+                if S.JumpPower ~= 50 then
+                    h.UseJumpPower = true; h.JumpPower = S.JumpPower
+                elseif prev.JumpPower ~= 50 then
+                    h.JumpPower = 50
+                end
+                prev.JumpPower = S.JumpPower
+
+                if S.Noclip then
+                    for _, v in ipairs(getChar():GetDescendants()) do
+                        if v:IsA("BasePart") then
+                            v.CanCollide = false
+                            pcall(function() v.CollisionGroup = "BHRV_NoClip" end)
+                        end
+                    end
+                elseif prev.Noclip then
+                    for _, v in ipairs(getChar():GetDescendants()) do
+                        if v:IsA("BasePart") then
+                            v.CanCollide = true
+                            pcall(function() v.CollisionGroup = "Default" end)
+                        end
+                    end
+                end
+                prev.Noclip = S.Noclip
+
+                if S.AntiTase then
+                    if h.WalkSpeed < 16 then h.WalkSpeed = S.Speed and S.SpeedValue or 16 end
+                    if r.Anchored then r.Anchored = false end
+                    pcall(function() if h.PlatformStand then h.PlatformStand = false end end)
+                end
+
+                if S.AntiArrest then
+                    if h.PlatformStand then
+                        pcall(function() h.PlatformStand = false end)
+                    end
+                    if r.Anchored then r.Anchored = false end
+                end
+
+                if tick() - recentlyTeleported > 1.5 then
+                    if h.Health < lastSafeHealth - 5 and h.Health > 0 then
+                        local inCombat = false
+                        for _, p in ipairs(getPlayers()) do
+                            local hrp = p.Character:FindFirstChild("HumanoidRootPart")
+                            if hrp and (hrp.Position - r.Position).Magnitude < 15 then
+                                inCombat = true; break
+                            end
+                        end
+                        if not inCombat then
+                            pcall(function() h.Health = lastSafeHealth end)
+                        end
+                    end
+                    lastSafeHealth = h.Health
+                end
+            end
+
+            if S.ESP then
+                for _, p in ipairs(Players:GetPlayers()) do
+                    if p ~= LP and p.Character then
+                        local d = espData[p]
+                        if d and d.hl and d.hl.Adornee ~= p.Character then
+                            pcall(function() d.hl:Destroy() end)
+                            pcall(function() d.bg:Destroy() end)
+                            espData[p] = nil
+                        end
+                        local nd = makeESPFor(p)
+                        if nd then
+                            local col = teamColor(p)
+                            pcall(function()
+                                nd.hl.FillColor = col
+                                nd.hl.OutlineColor = col
+                                nd.hl.Enabled = true
+                                nd.bg.Enabled = true
+                                nd.teamLbl.Text = "[" .. getTeamName(p) .. "]"
+                                nd.teamLbl.TextColor3 = col
+                            end)
+                        end
+                    end
+                end
+            else
+                for _, d in pairs(espData) do
+                    pcall(function() d.hl.Enabled = false end)
+                    pcall(function() d.bg.Enabled = false end)
+                end
+            end
+        end)
+    end)
+
+    RunService.RenderStepped:Connect(function()
+        pcall(function()
+            local cam = getCam(); if not cam then return end
+            if S.Fullbright then
+                Lighting.Ambient = Color3.fromRGB(255, 255, 255)
+                Lighting.Brightness = 5
+                Lighting.ClockTime = 12
+                Lighting.FogEnd = 1e6
+            end
+            if S.FOV ~= 70 then cam.FieldOfView = S.FOV end
+        end)
+    end)
+
+    -- TRIGGERBOT with smart auto team check
+    task.spawn(function()
+        while gui.Parent do
+            if S.Triggerbot then
+                pcall(function()
+                    local cam = getCam()
+                    if cam then
+                        local params = RaycastParams.new()
+                        local c = getChar()
+                        if c then
+                            params.FilterDescendantsInstances = {c}
+                            params.FilterType = Enum.RaycastFilterType.Exclude
+                        end
+                        local result = workspace:Raycast(
+                            cam.CFrame.Position,
+                            cam.CFrame.LookVector * 500,
+                            params
+                        )
+                        if result and result.Instance then
+                            for _, p in ipairs(getPlayers()) do
+                                if p.Character and result.Instance:IsDescendantOf(p.Character) then
+                                    if isTargetEnemy(p) then
+                                        local myC = getChar()
+                                        if myC then
+                                            for _, t in ipairs(myC:GetChildren()) do
+                                                if t:IsA("Tool") then
+                                                    pcall(function() t:Activate() end)
+                                                    break
+                                                end
+                                            end
+                                        end
+                                    end
+                                    break
+                                end
+                            end
+                        end
+                    end
+                end)
+            end
+            task.wait(0.06)
+        end
+    end)
+
+    -- AUTO KEYCARD
+    task.spawn(function()
+        while gui.Parent do
+            if S.AutoKeycard and not findHeldTool({"keycard"}) then
+                pcall(function()
+                    local kc = findSpawnedTool({"keycard"})
+                    if kc then
+                        grabTool({"keycard"}, function(s)
+                            if toolsStatus then toolsStatus.Text = "AutoKeycard: " .. s end
+                        end)
+                    end
+                end)
+            end
+            task.wait(1)
+        end
+    end)
+
+    print("[BHRV] V1 loaded — platform:", Platform)
+end
+
+if G.__BH_Platform then
+    selector:Destroy()
+    local ok, err = xpcall(G.__BH_BuildMain, debug.traceback)
+    if not ok then
+        G.__BH_Platform = nil
+        warn("[BHRV] auto-build failed:", err)
+    end
+end
