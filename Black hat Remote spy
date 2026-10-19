@@ -1,0 +1,473 @@
+--[[
+    Black Hat Remote Spy V1
+    Yield-safe. Batched UI. Spam filter. Fixed minimize.
+--]]
+
+print("[BHRV] spy start")
+
+local Players      = game:GetService("Players")
+local UIS          = game:GetService("UserInputService")
+local RS           = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+
+local LP        = Players.LocalPlayer
+local playerGui = LP:WaitForChild("PlayerGui", 10)
+
+local G = getgenv and getgenv() or _G
+if G.__BH_RS_OLDNC then
+    pcall(function()
+        local mt = getrawmetatable(game)
+        setreadonly(mt, false)
+        mt.__namecall = G.__BH_RS_OLDNC
+        setreadonly(mt, true)
+    end)
+    G.__BH_RS_OLDNC = nil
+end
+
+local old = playerGui:FindFirstChild("BlackHatRemoteSpyV1")
+if old then old:Destroy() end
+
+-- ============================================================
+-- GUI
+-- ============================================================
+local gui = Instance.new("ScreenGui")
+gui.Name = "BlackHatRemoteSpyV1"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.DisplayOrder = 999
+gui.Parent = playerGui
+
+local main = Instance.new("Frame")
+main.Size = UDim2.fromOffset(400, 320)
+main.Position = UDim2.new(0.5, -200, 0.5, -160)
+main.BackgroundColor3 = Color3.fromRGB(15, 5, 25)
+main.BorderSizePixel = 0
+main.Active = true
+main.Parent = gui
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 8)
+local st = Instance.new("UIStroke")
+st.Color = Color3.fromRGB(120, 0, 200); st.Thickness = 2; st.Parent = main
+
+local title = Instance.new("Frame")
+title.Size = UDim2.new(1, 0, 0, 30)
+title.BackgroundColor3 = Color3.fromRGB(30, 0, 50)
+title.BorderSizePixel = 0; title.Parent = main
+title.ZIndex = 1
+Instance.new("UICorner", title).CornerRadius = UDim.new(0, 8)
+local tfix = Instance.new("Frame")
+tfix.Size = UDim2.new(1,0,0,10); tfix.Position = UDim2.new(0,0,1,-10)
+tfix.BackgroundColor3 = Color3.fromRGB(30,0,50); tfix.BorderSizePixel = 0; tfix.Parent = title
+tfix.ZIndex = 1
+
+local tl = Instance.new("TextLabel")
+tl.Size = UDim2.new(1,-60,1,0); tl.Position = UDim2.new(0,10,0,0)
+tl.BackgroundTransparency = 1
+tl.Text = "Black Hat Remote Spy V1"
+tl.TextColor3 = Color3.fromRGB(190, 90, 255)
+tl.Font = Enum.Font.GothamBold; tl.TextSize = 13
+tl.TextXAlignment = Enum.TextXAlignment.Left; tl.Parent = title
+tl.ZIndex = 2
+
+-- Buttons parented to MAIN (not title), high ZIndex, larger targets
+local minBtn = Instance.new("TextButton")
+minBtn.Size = UDim2.fromOffset(26, 26)
+minBtn.Position = UDim2.new(1, -60, 0, 2)
+minBtn.BackgroundColor3 = Color3.fromRGB(50, 10, 70)
+minBtn.Text = "—"
+minBtn.TextColor3 = Color3.fromRGB(220, 180, 255)
+minBtn.Font = Enum.Font.GothamBold
+minBtn.TextSize = 15
+minBtn.BorderSizePixel = 0
+minBtn.ZIndex = 100
+minBtn.Parent = main
+Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 6)
+
+local cb = Instance.new("TextButton")
+cb.Size = UDim2.fromOffset(26, 26)
+cb.Position = UDim2.new(1, -30, 0, 2)
+cb.BackgroundColor3 = Color3.fromRGB(60, 0, 80)
+cb.Text = "X"
+cb.TextColor3 = Color3.fromRGB(255,255,255)
+cb.Font = Enum.Font.GothamBold
+cb.TextSize = 12
+cb.BorderSizePixel = 0
+cb.ZIndex = 100
+cb.Parent = main
+Instance.new("UICorner", cb).CornerRadius = UDim.new(0, 6)
+cb.MouseButton1Click:Connect(function() gui.Enabled = false end)
+
+-- Drag
+local dgn, dgi, dgs, dsp
+title.InputBegan:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+        dgn = true; dgs = i.Position; dsp = main.Position
+        i.Changed:Connect(function()
+            if i.UserInputState == Enum.UserInputState.End then dgn = false end
+        end)
+    end
+end)
+title.InputChanged:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then dgi = i end
+end)
+UIS.InputChanged:Connect(function(i)
+    if i == dgi and dgn then
+        local d = i.Position - dgs
+        main.Position = UDim2.new(dsp.X.Scale, dsp.X.Offset + d.X, dsp.Y.Scale, dsp.Y.Offset + d.Y)
+    end
+end)
+
+local status = Instance.new("TextLabel")
+status.Size = UDim2.new(1, -20, 0, 18)
+status.Position = UDim2.fromOffset(10, 36)
+status.BackgroundTransparency = 1
+status.Text = "idle — click Start"
+status.TextColor3 = Color3.fromRGB(180, 160, 210)
+status.Font = Enum.Font.Code; status.TextSize = 11
+status.TextXAlignment = Enum.TextXAlignment.Left; status.Parent = main
+
+local box = Instance.new("ScrollingFrame")
+box.Size = UDim2.new(1, -12, 1, -124)
+box.Position = UDim2.fromOffset(6, 94)
+box.BackgroundColor3 = Color3.fromRGB(22, 10, 34)
+box.BorderSizePixel = 0
+box.ScrollBarThickness = 4
+box.ScrollBarImageColor3 = Color3.fromRGB(140, 40, 210)
+box.CanvasSize = UDim2.new(0, 0, 0, 0)
+box.AutomaticCanvasSize = Enum.AutomaticSize.Y
+box.Parent = main
+Instance.new("UICorner", box).CornerRadius = UDim.new(0, 5)
+
+local logLabel = Instance.new("TextLabel")
+logLabel.Size = UDim2.new(1, -12, 0, 0)
+logLabel.Position = UDim2.fromOffset(6, 4)
+logLabel.BackgroundTransparency = 1
+logLabel.Text = ""
+logLabel.TextColor3 = Color3.fromRGB(220, 210, 240)
+logLabel.Font = Enum.Font.Code; logLabel.TextSize = 10
+logLabel.TextXAlignment = Enum.TextXAlignment.Left
+logLabel.TextYAlignment = Enum.TextYAlignment.Top
+logLabel.TextWrapped = true
+logLabel.AutomaticSize = Enum.AutomaticSize.Y
+logLabel.Parent = box
+
+-- ============================================================
+-- Minimize (robust — no ClipsDescendants)
+-- ============================================================
+local minimized = false
+local minimizing = false
+local expandedSize = UDim2.fromOffset(400, 320)
+
+local function collectContent()
+    local list = {}
+    for _, v in ipairs(main:GetChildren()) do
+        if v ~= title and v ~= minBtn and v ~= cb and v:IsA("GuiObject") then
+            table.insert(list, v)
+        end
+    end
+    return list
+end
+
+minBtn.MouseButton1Click:Connect(function()
+    if minimizing then return end
+    minimizing = true
+    local contents = collectContent()
+
+    if not minimized then
+        expandedSize = main.Size
+        for _, v in ipairs(contents) do v.Visible = false end
+        local t = TweenService:Create(main, TweenInfo.new(0.15), {
+            Size = UDim2.fromOffset(expandedSize.X.Offset, 30)
+        })
+        t:Play()
+        t.Completed:Connect(function()
+            minimized = true
+            minBtn.Text = "+"
+            minimizing = false
+        end)
+    else
+        local t = TweenService:Create(main, TweenInfo.new(0.15), {Size = expandedSize})
+        t:Play()
+        t.Completed:Connect(function()
+            for _, v in ipairs(contents) do v.Visible = true end
+            minimized = false
+            minBtn.Text = "—"
+            minimizing = false
+        end)
+    end
+end)
+
+-- ============================================================
+-- State
+-- ============================================================
+local logBuffer  = {}
+local callCount  = 0
+local paused     = false
+local hooked     = false
+local active     = true
+local filterSpam = true
+local logDirty   = false
+local pending    = {}
+local pathCache  = setmetatable({}, {__mode = "k"})
+local origNC     = nil
+
+local REMOTE_CLASSES = {
+    RemoteEvent = true,
+    RemoteFunction = true,
+    UnreliableRemoteEvent = true,
+}
+local REMOTE_METHODS = {
+    FireServer = true,
+    InvokeServer = true,
+    FireClient = true,
+    InvokeClient = true,
+}
+local SPAM = {
+    ["ValidateCanChat"] = true,
+    ["CanUsersDirectChatAsync"] = true,
+    ["Ping"] = true,
+    ["UpdateFFlag"] = true,
+    ["UpdateCameraRotation"] = true,
+    ["UpdateCameraRotations"] = true,
+    ["RequestFFlags"] = true,
+}
+
+local function addLine(s)
+    if paused and hooked then return end
+    table.insert(logBuffer, s)
+    if #logBuffer > 200 then table.remove(logBuffer, 1) end
+    logDirty = true
+end
+
+local function buildPathCache()
+    pathCache = setmetatable({}, {__mode = "k"})
+    local function scan(root)
+        for _, obj in ipairs(root:GetDescendants()) do
+            if REMOTE_CLASSES[obj.ClassName] then
+                pathCache[obj] = obj:GetFullName()
+            end
+        end
+    end
+    pcall(scan, RS)
+    pcall(scan, game:GetService("ReplicatedFirst"))
+    pcall(scan, workspace)
+end
+
+local function fmt(...)
+    local n = select("#", ...)
+    if n == 0 then return "" end
+    local cap = math.min(n, 4)
+    local parts = {}
+    for i = 1, cap do
+        local a = select(i, ...)
+        local t = typeof(a)
+        if t == "Instance" then
+            parts[i] = a.ClassName .. ":" .. a.Name
+        elseif t == "number" then
+            parts[i] = tostring(a)
+        elseif t == "string" then
+            parts[i] = '"' .. a:sub(1, 30) .. '"'
+        elseif t == "boolean" then
+            parts[i] = tostring(a)
+        elseif t == "Vector3" then
+            parts[i] = string.format("V3(%.0f,%.0f,%.0f)", a.X, a.Y, a.Z)
+        elseif t == "CFrame" then
+            local p = a.Position
+            parts[i] = string.format("CF(%.0f,%.0f,%.0f)", p.X, p.Y, p.Z)
+        elseif t == "table" then
+            local k = 0
+            for _ in pairs(a) do k = k + 1; if k > 15 then break end end
+            parts[i] = "{n=" .. k .. "}"
+        else
+            parts[i] = t
+        end
+    end
+    if n > cap then parts[cap + 1] = "..." end
+    return table.concat(parts, ", ")
+end
+
+task.spawn(function()
+    while gui.Parent do
+        if #pending > 0 then
+            local batch = pending
+            pending = {}
+            for _, entry in ipairs(batch) do
+                pcall(function()
+                    if filterSpam and SPAM[entry.name] then return end
+                    callCount = callCount + 1
+                    addLine(">> " .. entry.m .. " [" .. (entry.us and "US" or "GAME") .. "] " .. entry.name)
+                    addLine("   " .. (pathCache[entry.self] or entry.name))
+                    local a = fmt(table.unpack(entry.args, 1, entry.argc))
+                    if a ~= "" then addLine("   args: " .. a) end
+                    addLine("")
+                end)
+            end
+        end
+        if logDirty then
+            logDirty = false
+            logLabel.Text = table.concat(logBuffer, "\n")
+            if hooked then
+                status.Text = string.format("LIVE | calls: %d | lines: %d | %s | filter: %s",
+                    callCount, #logBuffer,
+                    paused and "PAUSED" or "OK",
+                    filterSpam and "ON" or "OFF")
+            else
+                status.Text = string.format("idle | lines: %d", #logBuffer)
+            end
+        end
+        task.wait(0.1)
+    end
+end)
+
+-- ============================================================
+-- Hook — minimal
+-- ============================================================
+local function hookFn(self, ...)
+    if active then
+        if REMOTE_CLASSES[self.ClassName] then
+            local m = getnamecallmethod()
+            if REMOTE_METHODS[m] then
+                pending[#pending + 1] = {
+                    m = m, self = self, name = self.Name,
+                    args = {...}, argc = select("#", ...),
+                    us = checkcaller(),
+                }
+            end
+        end
+    end
+    return origNC(self, ...)
+end
+
+local function installHook()
+    if hooked then return true end
+    local ok = pcall(function()
+        local mt = getrawmetatable(game)
+        if not mt then error("no raw metatable") end
+        setreadonly(mt, false)
+        origNC = mt.__namecall
+        mt.__namecall = hookFn
+        setreadonly(mt, true)
+    end)
+    if not ok or not origNC then
+        local ok2, err2 = pcall(function()
+            origNC = hookmetamethod(game, "__namecall", hookFn)
+        end)
+        if not ok2 or not origNC then
+            return false, err2 or "hook failed"
+        end
+    end
+    G.__BH_RS_OLDNC = origNC
+    hooked = true
+    buildPathCache()
+    return true
+end
+
+local function removeHook()
+    if not hooked then return end
+    pcall(function()
+        local mt = getrawmetatable(game)
+        setreadonly(mt, false)
+        mt.__namecall = origNC
+        setreadonly(mt, true)
+    end)
+    G.__BH_RS_OLDNC = nil
+    hooked = false
+end
+
+local function mkBtn(text, x, w, fn)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.fromOffset(w, 24)
+    b.Position = UDim2.fromOffset(x, 60)
+    b.BackgroundColor3 = Color3.fromRGB(70, 20, 110)
+    b.Text = text; b.TextColor3 = Color3.fromRGB(230, 200, 255)
+    b.Font = Enum.Font.GothamBold; b.TextSize = 10
+    b.BorderSizePixel = 0; b.Parent = main
+    b.ZIndex = 5
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 5)
+    b.MouseButton1Click:Connect(function() pcall(fn) end)
+    return b
+end
+
+mkBtn("Start", 6, 55, function()
+    if hooked then addLine(">>> already running <<<"); return end
+    addLine(">>> installing hook... <<<")
+    local ok, err = installHook()
+    if ok then
+        addLine(">>> HOOK OK <<<")
+        addLine("PlaceId: " .. tostring(game.PlaceId))
+        addLine("Executor: " .. tostring(identifyexecutor and identifyexecutor() or "?"))
+        addLine("")
+    else
+        addLine(">>> HOOK FAILED: " .. tostring(err) .. " <<<")
+    end
+    logDirty = true
+end)
+
+mkBtn("Dump", 65, 55, function()
+    addLine("")
+    addLine("=== DUMP ===")
+    local count = 0
+    local seen = {}
+    local function scan(root, tag)
+        for _, v in ipairs(root:GetDescendants()) do
+            if (v:IsA("RemoteEvent") or v:IsA("RemoteFunction")
+            or v:IsA("UnreliableRemoteEvent")) and not seen[v] then
+                seen[v] = true
+                addLine("[" .. tag .. "] " .. v.ClassName .. "  " .. v:GetFullName())
+                count = count + 1
+            end
+        end
+    end
+    scan(RS, "RS")
+    pcall(function() scan(game:GetService("ReplicatedFirst"), "RF") end)
+    pcall(function() scan(workspace, "WS") end)
+    addLine("=== TOTAL: " .. count .. " ===")
+    addLine("")
+    logDirty = true
+end)
+
+mkBtn("Pause", 124, 55, function()
+    paused = not paused
+    logDirty = true
+end)
+
+mkBtn("Copy", 183, 55, function()
+    local s = table.concat(logBuffer, "\n")
+    local ok = false
+    if setclipboard then pcall(function() setclipboard(s); ok = true end) end
+    if not ok and toclipboard then pcall(function() toclipboard(s); ok = true end) end
+    if ok then addLine(">>> COPIED " .. #s .. " chars <<<")
+    else addLine(">>> no clipboard API <<<") end
+    logDirty = true
+end)
+
+mkBtn("Filter", 242, 55, function()
+    filterSpam = not filterSpam
+    addLine(">>> spam filter " .. (filterSpam and "ON" or "OFF") .. " <<<")
+    logDirty = true
+end)
+
+mkBtn("Stop", 301, 55, function()
+    if not hooked then addLine(">>> not running <<<"); return end
+    removeHook()
+    addLine(">>> hook removed <<<")
+    logDirty = true
+end)
+
+addLine("Ready. Click Start.")
+addLine("Minimize keeps hook passive (zero overhead).")
+logDirty = true
+
+gui:GetPropertyChangedSignal("Enabled"):Connect(function()
+    active = gui.Enabled
+end)
+
+UIS.InputBegan:Connect(function(i, gpe)
+    if gpe then return end
+    if i.KeyCode == Enum.KeyCode.RightShift then
+        gui.Enabled = not gui.Enabled
+    end
+end)
+
+print("[BHRV] spy ready")
+      
